@@ -2,13 +2,68 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import List
+import os
 
+from dotenv import load_dotenv
 import pandas as pd
 import streamlit as st
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+# Load environment variables
+load_dotenv()
 
 
 DATA_FILE = Path("saved_content.csv")
 DEFAULT_TAGS = ["Study", "Work", "Idea"]
+
+# Google Sheets
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
+GOOGLE_SHEET_TAB = os.getenv("GOOGLE_SHEET_TAB", "Sheet1")  
+CREDENTIALS_FILE = Path(os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json"))
+
+
+def get_google_sheets_client():
+	"""Authenticate and return Google Sheets client."""
+	try:
+		if not CREDENTIALS_FILE.exists():
+			return None
+		scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+		creds = ServiceAccountCredentials.from_json_keyfile_name(str(CREDENTIALS_FILE), scope)
+		return gspread.authorize(creds)
+	except Exception as e:
+		st.warning(f"Google Sheets sync unavailable: {str(e)}")
+		return None
+
+
+def append_to_google_sheet(row_data: dict) -> bool:
+	"""Append a row to Google Sheet."""
+	try:
+		client = get_google_sheets_client()
+		if not client or not GOOGLE_SHEET_ID or GOOGLE_SHEET_ID == "YOUR_GOOGLE_SHEET_ID":
+			return False
+		
+		# Open the spreadsheet
+		spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+		try:
+			sheet = spreadsheet.worksheet(GOOGLE_SHEET_TAB)
+		except Exception:
+			# If tab doesn't exist, use the first sheet
+			st.warning(f"Sheet tab '{GOOGLE_SHEET_TAB}' not found. Using first available tab.")
+			sheet = spreadsheet.sheet1
+		
+		row_values = [
+			row_data.get("username", ""),
+			row_data.get("content", ""),
+			row_data.get("reason", ""),
+			row_data.get("tags", ""),
+			row_data.get("saved_on", ""),
+		]
+		sheet.append_row(row_values)
+		return True
+	except Exception as e:
+		print(f"Error syncing to Google Sheets: {e}")
+		return False
 
 
 def load_data() -> pd.DataFrame:
@@ -24,7 +79,7 @@ def load_data() -> pd.DataFrame:
 				df[c] = ""
 		# Datetime sorting helper
 		if "saved_on" in df.columns:
-			# keep original text, but add a helper column for sorting
+			# keep original text for sorting
 			try:
 				dt = pd.to_datetime(df["saved_on"], errors="coerce")
 				df["_saved_on_dt"] = dt
@@ -122,7 +177,6 @@ with st.container():
 				# Add to available options
 				st.session_state.available_tags.append(tag_value)
 				st.session_state.available_tags = sorted(set(st.session_state.available_tags))
-				# Auto-select it in the multiselect
 				if tag_value not in st.session_state.selected_tags:
 					st.session_state.selected_tags.append(tag_value)
 				st.success(f"Added tag '{tag_value}'.")
@@ -142,7 +196,7 @@ with st.container():
 			if not content_input.strip() or not reason_input.strip():
 				st.warning("Please add both content and a reason before saving.")
 			else:
-				# Merge selected tags with a new tag (if provided)
+				# Merge selected tags 
 				effective_tags = list(st.session_state.get("selected_tags", []))
 				tag_value = new_tag.strip()
 				if tag_value:
@@ -152,31 +206,30 @@ with st.container():
 					if tag_value not in effective_tags:
 						effective_tags.append(tag_value)
 
-				tags_str = ", ".join(effective_tags) if effective_tags else ""
-				new_row = {
-					"username": st.session_state.current_user,
-					"content": content_input.strip(),
-					"reason": reason_input.strip(),
-					"tags": tags_str,
-					"saved_on": datetime.now().strftime("%Y-%m-%d %H:%M"),
-				}
-				all_data = pd.concat([all_data, pd.DataFrame([new_row])], ignore_index=True)
-				# Recompute helper datetime column for sorting
-				try:
-					all_data["_saved_on_dt"] = pd.to_datetime(all_data["saved_on"], errors="coerce")
-				except Exception:
-					all_data["_saved_on_dt"] = pd.NaT
-				# Sort by Order
-				if "_saved_on_dt" in all_data.columns:
-					all_data = all_data.sort_values("_saved_on_dt", ascending=False, kind="stable")
-				else:
-					all_data = all_data.sort_values("saved_on", ascending=False, kind="stable")
-				persist_data(all_data.drop(columns=["_saved_on_dt"], errors="ignore"))
-				# Refresh user data
-				data = get_user_data(all_data, st.session_state.current_user)
-				st.success("Content saved successfully.")
-
-
+			tags_str = ", ".join(effective_tags) if effective_tags else ""
+			new_row = {
+				"username": st.session_state.current_user,
+				"content": content_input.strip(),
+				"reason": reason_input.strip(),
+				"tags": tags_str,
+				"saved_on": datetime.now().strftime("%Y-%m-%d %H:%M"),
+			}
+			all_data = pd.concat([all_data, pd.DataFrame([new_row])], ignore_index=True)
+			try:
+				all_data["_saved_on_dt"] = pd.to_datetime(all_data["saved_on"], errors="coerce")
+			except Exception:
+				all_data["_saved_on_dt"] = pd.NaT
+			# Sort by Order
+			if "_saved_on_dt" in all_data.columns:
+				all_data = all_data.sort_values("_saved_on_dt", ascending=False, kind="stable")
+			else:
+				all_data = all_data.sort_values("saved_on", ascending=False, kind="stable")
+			persist_data(all_data.drop(columns=["_saved_on_dt"], errors="ignore"))
+			# Sync to Google Sheets
+			append_to_google_sheet(new_row)
+			# Refresh user data
+			data = get_user_data(all_data, st.session_state.current_user)
+			st.success("Content saved successfully.")
 with st.container():
 	st.header("Find saved content")
 	if not st.session_state.current_user:
@@ -207,7 +260,7 @@ with st.container():
 			if st.session_state.search_active and filtered.empty and search_query.strip():
 				st.warning("No saved content matches your search.")
 			else:
-				# Prefer sorting by parsed datetime if available
+				# Prefer sorting by parsed datetime
 				if "_saved_on_dt" in filtered.columns:
 					filtered = filtered.sort_values("_saved_on_dt", ascending=False)
 				else:

@@ -3,4 +3,7 @@ __pycache__/
 *.pyc
 .streamlit/
 .env
+.env.local
+credentials.json
 *.log
+saved_content.csv
