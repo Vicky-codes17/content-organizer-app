@@ -13,7 +13,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 # Load environment variables
 load_dotenv()
 
-
 DATA_FILE = Path("saved_content.csv")
 DEFAULT_TAGS = ["Study", "Work", "Idea"]
 
